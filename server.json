@@ -3,7 +3,7 @@
   "name": "io.github.pipeworx-io/ecb",
   "title": "Ecb",
   "description": "ECB Data Portal MCP — European Central Bank statistical data",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://pipeworx.io/packs/ecb",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-ecb",
