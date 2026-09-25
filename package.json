@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-ecb",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "ECB Data Portal MCP — European Central Bank statistical data",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-291834a10f3874c627e789fe06b89ba136235d6cdc4364d5c0a2f4525dfe7910",
-    "sourceCommit": "76aa8f5d9b5dc2f665563030647c68e661478864"
+    "sourceHash": "v1-6da2a22652c47fe27e8653b84d0dd4934e8b20677f51818b817ca676fbd0a2e3",
+    "sourceCommit": "4fa4c64448be06f4a2ee4cee19f756f3558a7cad"
   }
 }
