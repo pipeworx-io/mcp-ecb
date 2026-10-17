@@ -687,6 +687,10 @@ function collapse(s: string): string {
  * API docs: https://data.ecb.europa.eu/help/api/
  *
  * Tools:
+ * - ecb_policy_rate:   current deposit facility rate / main refinancing rate /
+ *                      marginal lending rate, each with effective_since,
+ *                      previous_rate and decision history (FM flow, the three
+ *                      official "key ECB interest rates" — fleet #3206)
  * - exchange_rate:     EUR → currency rate (convenience over EXR flow)
  * - hicp_inflation:    Harmonised CPI YoY change (convenience over ICP flow)
  * - get_data:          generic SDMX query against any flow
@@ -704,7 +708,27 @@ async function pwFetch(url: string | URL, init?: RequestInit): Promise<Response>
 
 const BASE = 'https://data-api.ecb.europa.eu/service';
 
+// The three official "key ECB interest rates", FM flow, confirmed against the
+// live series. DFR is the ECB's primary policy lever since the 2024 corridor
+// narrowing (deposits now drive short-term money-market rates); MRO and MLFR
+// are published alongside it and move on the same Governing Council dates.
+const POLICY_RATE_SERIES: { field: string; label: string; key: string }[] = [
+  { field: 'deposit_facility_rate', label: 'Deposit facility rate', key: 'D.U2.EUR.4F.KR.DFR.LEV' },
+  { field: 'main_refinancing_rate', label: 'Main refinancing operations rate (fixed-rate tenders)', key: 'D.U2.EUR.4F.KR.MRR_FR.LEV' },
+  { field: 'marginal_lending_facility_rate', label: 'Marginal lending facility rate', key: 'D.U2.EUR.4F.KR.MLFR.LEV' },
+];
+
 const tools: McpToolExport['tools'] = [
+  {
+    name: 'ecb_policy_rate',
+    description:
+      "The European Central Bank's three official key interest rates — the deposit facility rate (the ECB's " +
+      'primary policy rate since the 2024 operational-framework reform), the main refinancing operations rate, ' +
+      'and the marginal lending facility rate. For each: the current rate, the date it took effect, the previous ' +
+      'rate and when that one took effect, plus recent decision history (FM flow, series DFR/MRR_FR/MLFR). ' +
+      "Use this for \"ECB interest rate\" / \"ECB deposit rate\" / \"has the ECB cut rates\" instead of guessing an FM series key.",
+    inputSchema: { type: 'object', properties: {} },
+  },
   {
     name: 'ecb_exchange_rate',
     description:
@@ -777,6 +801,8 @@ const tools: McpToolExport['tools'] = [
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   switch (name) {
+    case 'ecb_policy_rate':
+      return policyRate();
     case 'ecb_exchange_rate':
       return exchangeRate(args);
     case 'ecb_hicp_inflation':
@@ -788,6 +814,76 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+/** {rate, effective_since, previous_rate, previous_rate_effective_since, decision_history, data_as_of} from an ascending {period,value} series. */
+function computeRateChanges(obs: { period: string; value: number | null }[]) {
+  const pts = obs.filter((o) => o.value !== null) as { period: string; value: number }[];
+  if (pts.length === 0) return null;
+  const changes: { rate: number; effective_since: string }[] = [{ rate: pts[0].value, effective_since: pts[0].period }];
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].value !== changes[changes.length - 1].rate) {
+      changes.push({ rate: pts[i].value, effective_since: pts[i].period });
+    }
+  }
+  const current = changes[changes.length - 1];
+  const previous = changes.length > 1 ? changes[changes.length - 2] : null;
+  return {
+    rate: current.rate,
+    effective_since: current.effective_since,
+    previous_rate: previous?.rate ?? null,
+    previous_rate_effective_since: previous?.effective_since ?? null,
+    decision_history: changes.slice(-5).reverse(),
+    data_as_of: pts[pts.length - 1].period,
+  };
+}
+
+async function policyRate() {
+  // ~6 years of daily observations — comfortably more than enough to see the
+  // last several Governing Council rate decisions.
+  const results = await Promise.all(
+    POLICY_RATE_SERIES.map(async (s) => {
+      try {
+        const data = await fetchData('FM', s.key, { start_period: '2020-01-01' });
+        const series = data.series[0]?.observations ?? [];
+        return { field: s.field, label: s.label, computed: computeRateChanges(series), fetchError: null as string | null };
+      } catch (err) {
+        // A fixed, verified-live key failing is an upstream fault, not a bad
+        // query — surface it per-field rather than failing the whole call,
+        // since the other two rates may well still be answerable.
+        return { field: s.field, label: s.label, computed: null, fetchError: err instanceof Error ? err.message : String(err) };
+      }
+    }),
+  );
+  const missing = results.filter((r) => r.computed === null);
+  if (missing.length === results.length) {
+    return {
+      error: 'no_data',
+      message:
+        'The ECB returned no observations for any of the key interest rate series (FM flow, DFR/MRR_FR/MLFR). ' +
+        'The series shape may have changed upstream; try get_data with flow_ref "FM" directly.',
+    };
+  }
+  const primary = results.find((r) => r.field === 'deposit_facility_rate')!;
+  const out: Record<string, unknown> = {
+    unit: 'percent',
+    // Aggregate fields first: the deposit facility rate is the ECB's primary
+    // policy lever since the 2024 corridor reform, so it carries the
+    // top-level {rate, effective_since, previous_rate, ...} shape directly —
+    // a caller asking "the ECB rate" does not have to know there are three.
+    ...(primary.computed ?? {}),
+  };
+  for (const r of results) {
+    out[r.field] = r.computed
+      ? { label: r.label, ...r.computed }
+      : { label: r.label, error: 'no_data', message: r.fetchError ?? `The ECB returned no observations for ${r.label}.` };
+  }
+  out.note =
+    "The ECB's three official key interest rates (deposit facility, main refinancing, marginal lending). " +
+    'The deposit facility rate has been the primary signal of the ECB monetary-policy stance since the ' +
+    "2024 operational-framework reform narrowed the corridor; top-level fields describe it. All three " +
+    'normally change together, on the same Governing Council decision date.';
+  return out;
 }
 
 async function exchangeRate(args: Record<string, unknown>) {
@@ -836,9 +932,23 @@ async function fetchData(
   if (opts.last_n) params.set('lastNObservations', String(opts.last_n));
   const url = `${BASE}/data/${encodeURIComponent(flow)}/${encodeURIComponent(key)}?${params}`;
   const res = await pwFetch(url, { headers: { Accept: 'application/json' } });
-  if (res.status === 404) throw new Error(`ECB: no data for flow=${flow} key=${key}`);
+  if (res.status === 404) {
+    throw new Error(
+      `not_found: the ECB has no series matching key "${key}" in flow "${flow}". The key does not exist at that ` +
+        'shape, not just empty for this period — check the dimension values, or call list_dataflows for valid flow_refs.',
+    );
+  }
   if (!res.ok) {
     const body = await res.text();
+    // A malformed key (wrong dimension count) gets ECB's generic error page —
+    // HTML, not SDMX JSON. Leaking it verbatim reads as a Pipeworx bug and
+    // buries the one useful fact (the request was malformed) under markup.
+    if (body.trimStart().startsWith('<')) {
+      throw new Error(
+        `user_error: the ECB rejected key "${key}" for flow "${flow}" as malformed (HTTP ${res.status}). ` +
+          'SDMX keys are dot-separated dimension values in a fixed order for that flow — check the dimension count.',
+      );
+    }
     throw new Error(`ECB error: ${res.status} ${body.slice(0, 200)}`);
   }
   // ECB answers a 200 with a ZERO-BYTE body during an outage, and res.json()
