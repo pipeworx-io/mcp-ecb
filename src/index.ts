@@ -1177,8 +1177,30 @@ async function hicpInflation(args: Record<string, unknown>) {
   });
 }
 
+/**
+ * An ECB Data Portal series key is written FLOW.dim.dim..., e.g.
+ * MIR.M.IT.B.A2C.A.R.A.2250.EUR.P, so callers hand the whole string over as
+ * flow_ref, or repeat the flow id at the head of key (fleet #3669). The ECB has
+ * no series whose first dimension equals its own flow id (the first dimension
+ * is FREQ), so stripping that prefix cannot change the meaning of a well-formed
+ * call; it only turns a guaranteed 404 into the series the caller named.
+ */
+function splitFlowPrefixedKey(flow: string, key: string): { flow: string; key: string } {
+  const flowDot = flow.indexOf('.');
+  if (flowDot > 0) {
+    // flow_ref carries the whole key ("MIR.M.IT...."). An explicit key that is
+    // not the same remainder wins nothing - the dotted flow_ref is the series.
+    return { flow: flow.slice(0, flowDot), key: flow.slice(flowDot + 1) };
+  }
+  if (key.startsWith(flow + '.')) return { flow, key: key.slice(flow.length + 1) };
+  return { flow, key };
+}
+
 async function getData(args: Record<string, unknown>) {
-  return fetchData(reqStr(args, 'flow_ref', '"EXR"'), reqStr(args, 'key', '"D.USD.EUR.SP00.A"'), {
+  const flowArg = reqStr(args, 'flow_ref', '"EXR"').trim();
+  const keyArg = flowArg.includes('.') && args.key == null ? '' : reqStr(args, 'key', '"D.USD.EUR.SP00.A"').trim();
+  const split = splitFlowPrefixedKey(flowArg, keyArg);
+  return fetchData(split.flow, split.key, {
     start_period: args.start_period as string | undefined,
     end_period: args.end_period as string | undefined,
     last_n: args.last_n as number | undefined,
